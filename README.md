@@ -28,6 +28,7 @@ Read only access only.
 | Bzip2      |                      | Decompression                      |
 | Zlib       |                      | Decompression                      |
 | liblzma    |                      | Decompression (xz)                 |
+| lzfse      |                      | Optional: LZFSE decompression      |
 | FUSE       | 2.x (not 3.x)        | Userspace filesystem support       |
 | libicu     |                      | Unicode support                    |
 | libxml2    |                      | XML (property list) parsing        |

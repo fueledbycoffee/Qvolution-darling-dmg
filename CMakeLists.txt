@@ -52,6 +52,18 @@ include(FindLibXml2)
 find_package(LibXml2 REQUIRED)
 include_directories(${LIBXML2_INCLUDE_DIR})
 
+# LZFSE chunks, common in APFS images, need Apple's open-source lzfse library
+# (https://github.com/lzfse/lzfse), which few distributions package. Add its install
+# prefix to CMAKE_PREFIX_PATH to enable them; without it they fail to decompress.
+find_path(LZFSE_INCLUDE_DIR lzfse.h)
+find_library(LZFSE_LIBRARY lzfse)
+set(DMG_LZFSE_LIBRARIES "")
+if (LZFSE_INCLUDE_DIR AND LZFSE_LIBRARY)
+	add_definitions(-DCOMPILE_WITH_LZFSE=1)
+	include_directories(${LZFSE_INCLUDE_DIR})
+	set(DMG_LZFSE_LIBRARIES ${LZFSE_LIBRARY})
+endif ()
+
 if (WITH_TESTS)
 	enable_testing()
 	find_package(Boost COMPONENTS unit_test_framework REQUIRED)
@@ -105,7 +117,7 @@ add_library(dmg SHARED
 	src/APFSVolume.cpp
 )
 target_compile_features(dmg PRIVATE cxx_std_11)
-target_link_libraries(dmg -licuuc -lcrypto -lz -lbz2 -llzma ${LIBXML2_LIBRARY})
+target_link_libraries(dmg -licuuc -lcrypto -lz -lbz2 -llzma ${DMG_LZFSE_LIBRARIES} ${LIBXML2_LIBRARY})
 install(TARGETS dmg DESTINATION lib)
 
 add_executable(darling-dmg
@@ -129,6 +141,10 @@ install(TARGETS darling-dmg-extract RUNTIME DESTINATION bin)
 # darling-dmg-extract's output with manifests recorded from an independent extractor.
 set(DMG_TEST_ARTIFACTS "" CACHE PATH "Directory of vendor disk images and their manifests")
 if (DMG_TEST_ARTIFACTS)
+	if (NOT DMG_LZFSE_LIBRARIES)
+		message(FATAL_ERROR "DMG_TEST_ARTIFACTS needs lzfse, because the CotEditor image is "
+			"stored in LZFSE chunks; add an lzfse install prefix to CMAKE_PREFIX_PATH")
+	endif ()
 	enable_testing()
 	find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
