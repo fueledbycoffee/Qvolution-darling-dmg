@@ -9,6 +9,9 @@ Without darling-dmg, the only way to do this would be to manually extract the DM
 * DMG (UDIF) files containing an Apple Disk Image.
 * Apple Disk Images containing an HFS+/HFSX file system.
 * HFS+/HFSX file systems (incl. file systems embedded within HFS).
+* APFS containers holding an unencrypted volume, for extraction with `darling-dmg-extract` and
+  Darling's `hdiutil` only (not the FUSE module). Files compressed with decmpfs are not yet
+  supported on APFS.
 
 This means, darling-dmg can mount DMG files or unpacked DMG files or a single partition carved out of the latter.
 

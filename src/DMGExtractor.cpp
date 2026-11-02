@@ -1,5 +1,7 @@
 #include "DMGExtractor.h"
 
+#include "APFSContainer.h"
+#include "APFSVolume.h"
 #include "AppleDisk.h"
 #include "DMGDisk.h"
 #include "FileReader.h"
@@ -41,7 +43,8 @@ void requireEmptyDirectory(const std::string& path) {
     if (!empty) throw std::runtime_error("destination is not empty: " + path);
 }
 
-void copyFile(HFSHighLevelVolume& volume, const std::string& source,
+template <typename Volume>
+void copyFile(Volume& volume, const std::string& source,
               const std::string& destination, const struct stat& st) {
     auto reader = volume.openFile(source);
     if (st.st_size < 0) throw std::runtime_error("negative file size: " + source);
@@ -84,7 +87,8 @@ void copyFile(HFSHighLevelVolume& volume, const std::string& source,
     if (close(fd) != 0) fail("close file", destination);
 }
 
-void copyDirectory(HFSHighLevelVolume& volume, const std::string& source,
+template <typename Volume>
+void copyDirectory(Volume& volume, const std::string& source,
                    const std::string& destination) {
     for (const auto& entry : volume.listDirectory(source)) {
         const std::string& name = entry.first;
@@ -113,10 +117,12 @@ void extractDMG(const std::string& imagePath, const std::string& destination) {
     auto reader = std::make_shared<FileReader>(imagePath.c_str());
     std::unique_ptr<PartitionedDisk> disk;
     std::shared_ptr<HFSVolume> hfs;
+    std::shared_ptr<APFSContainer> apfs;
     if (DMGDisk::isDMG(reader)) disk.reset(new DMGDisk(reader));
     else if (GPTDisk::isGPTDisk(reader)) disk.reset(new GPTDisk(reader));
     else if (AppleDisk::isAppleDisk(reader)) disk.reset(new AppleDisk(reader));
     else if (HFSVolume::isHFSPlus(reader)) hfs.reset(new HFSVolume(reader));
+    else if (APFSContainer::isAPFS(reader)) apfs.reset(new APFSContainer(reader));
     else throw std::runtime_error("unsupported disk image format: " + imagePath);
 
     if (disk) {
@@ -127,8 +133,26 @@ void extractDMG(const std::string& imagePath, const std::string& destination) {
                 break;
             }
         }
+        // GPT names APFS partitions by type GUID only, so recognize containers by their superblock.
+        for (size_t i = 0; !hfs && i < partitions.size(); ++i) {
+            auto partition = disk->readerForPartition(i);
+            if (partition && APFSContainer::isAPFS(partition)) {
+                apfs.reset(new APFSContainer(partition));
+                break;
+            }
+        }
     }
-    if (!hfs) throw std::runtime_error("no HFS+/HFSX partition: " + imagePath);
-    HFSHighLevelVolume volume(hfs);
-    copyDirectory(volume, "/", destination);
+
+    if (hfs) {
+        HFSHighLevelVolume volume(hfs);
+        copyDirectory(volume, "/", destination);
+    } else if (apfs) {
+        // Disk images hold a single volume; take the first.
+        std::vector<oid_t> volumes = apfs->volumes();
+        if (volumes.empty()) throw std::runtime_error("APFS container has no volumes: " + imagePath);
+        APFSVolume volume(apfs, volumes.front());
+        copyDirectory(volume, "/", destination);
+    } else {
+        throw std::runtime_error("no HFS+/HFSX or APFS partition: " + imagePath);
+    }
 }
