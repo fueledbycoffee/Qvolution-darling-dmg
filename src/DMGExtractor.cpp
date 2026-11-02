@@ -110,6 +110,44 @@ void copyDirectory(Volume& volume, const std::string& source,
     }
 }
 
+// Picks the file system to extract from a partitioned disk: a partition typed as HFS+, else the
+// first partition that starts with an HFS+ or APFS signature (GPT types APFS by GUID only, and
+// images can label a partition "disk image" with no type), else, one level down, a partition that
+// holds a partition map of its own, as an image of a whole disk does.
+void findVolume(PartitionedDisk& disk, std::shared_ptr<HFSVolume>& hfs,
+                std::shared_ptr<APFSContainer>& apfs, bool nested) {
+    const auto& partitions = disk.partitions();
+    for (size_t i = 0; i < partitions.size(); ++i) {
+        if (partitions[i].type == "Apple_HFS" || partitions[i].type == "Apple_HFSX") {
+            hfs.reset(new HFSVolume(disk.readerForPartition(i)));
+            return;
+        }
+    }
+    for (size_t i = 0; i < partitions.size(); ++i) {
+        auto partition = disk.readerForPartition(i);
+        if (!partition) continue;
+        if (HFSVolume::isHFSPlus(partition)) {
+            hfs.reset(new HFSVolume(partition));
+            return;
+        }
+        if (APFSContainer::isAPFS(partition)) {
+            apfs.reset(new APFSContainer(partition));
+            return;
+        }
+    }
+    if (nested) return;
+    for (size_t i = 0; i < partitions.size(); ++i) {
+        auto partition = disk.readerForPartition(i);
+        std::unique_ptr<PartitionedDisk> inner;
+        if (!partition) continue;
+        if (GPTDisk::isGPTDisk(partition)) inner.reset(new GPTDisk(partition));
+        else if (AppleDisk::isAppleDisk(partition)) inner.reset(new AppleDisk(partition));
+        else continue;
+        findVolume(*inner, hfs, apfs, true);
+        if (hfs || apfs) return;
+    }
+}
+
 } // namespace
 
 void extractDMG(const std::string& imagePath, const std::string& destination) {
@@ -125,23 +163,7 @@ void extractDMG(const std::string& imagePath, const std::string& destination) {
     else if (APFSContainer::isAPFS(reader)) apfs.reset(new APFSContainer(reader));
     else throw std::runtime_error("unsupported disk image format: " + imagePath);
 
-    if (disk) {
-        const auto& partitions = disk->partitions();
-        for (size_t i = 0; i < partitions.size(); ++i) {
-            if (partitions[i].type == "Apple_HFS" || partitions[i].type == "Apple_HFSX") {
-                hfs.reset(new HFSVolume(disk->readerForPartition(i)));
-                break;
-            }
-        }
-        // GPT names APFS partitions by type GUID only, so recognize containers by their superblock.
-        for (size_t i = 0; !hfs && i < partitions.size(); ++i) {
-            auto partition = disk->readerForPartition(i);
-            if (partition && APFSContainer::isAPFS(partition)) {
-                apfs.reset(new APFSContainer(partition));
-                break;
-            }
-        }
-    }
+    if (disk) findVolume(*disk, hfs, apfs, false);
 
     if (hfs) {
         HFSHighLevelVolume volume(hfs);
