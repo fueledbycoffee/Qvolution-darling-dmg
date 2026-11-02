@@ -7,6 +7,8 @@
 #include <openssl/evp.h>
 #include <memory>
 #include <sstream>
+#include <climits>
+#include <cstdlib>
 #include "DMGPartition.h"
 #include "AppleDisk.h"
 #include "GPTDisk.h"
@@ -230,9 +232,35 @@ bool DMGDisk::base64Decode(const std::string& input, std::vector<uint8_t>& outpu
 	return rd >= 0;
 }
 
+std::vector<int> DMGDisk::blkxIDs()
+{
+	std::vector<int> ids;
+	xmlXPathContextPtr xpathContext = xmlXPathNewContext(m_kolyXML);
+	xmlXPathObjectPtr xpathObj = xmlXPathEvalExpression((const xmlChar*) "/plist/dict/key[text()='resource-fork']/following-sibling::dict[1]/key[text()='blkx']"
+			"/following-sibling::array[1]/dict/key[text()='ID']/following-sibling::string[1]", xpathContext);
+
+	if (xpathObj && xpathObj->nodesetval)
+	{
+		for (int i = 0; i < xpathObj->nodesetval->nodeNr; i++)
+		{
+			xmlChar* text = xmlNodeGetContent(xpathObj->nodesetval->nodeTab[i]);
+			char* end;
+			long id = strtol((const char*) text, &end, 10);
+
+			if (end != (const char*) text && *end == 0 && id >= INT_MIN && id <= INT_MAX)
+				ids.push_back(int(id));
+			xmlFree(text);
+		}
+	}
+
+	xmlXPathFreeObject(xpathObj);
+	xmlXPathFreeContext(xpathContext);
+	return ids;
+}
+
 std::shared_ptr<Reader> DMGDisk::readerForPartition(int index)
 {
-	for (int i = -1;; i++)
+	for (int i : blkxIDs())
 	{
 		BLKXTable* table = loadBLKXTableForPartition(i);
 		

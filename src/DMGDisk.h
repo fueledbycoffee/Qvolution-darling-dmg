@@ -23,6 +23,7 @@ private:
 	static bool parseNameAndType(const std::string& nameAndType, std::string& name, std::string& type);
 	static bool base64Decode(const std::string& input, std::vector<uint8_t>& output);
 	BLKXTable* loadBLKXTableForPartition(int index);
+	std::vector<int> blkxIDs();
 	std::shared_ptr<Reader> readerForKolyBlock(int index);
 private:
 	std::shared_ptr<Reader> m_reader;
