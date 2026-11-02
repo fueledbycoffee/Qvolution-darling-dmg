@@ -116,6 +116,29 @@ target_compile_features(darling-dmg-extract PRIVATE cxx_std_11)
 target_link_libraries(darling-dmg-extract dmg)
 install(TARGETS darling-dmg-extract RUNTIME DESTINATION bin)
 
+# Vendor disk images are too large to commit. Point DMG_TEST_ARTIFACTS at a directory
+# laid out as <app>/<version>/{<image>,bundle-content-manifest.json} to compare
+# darling-dmg-extract's output with manifests recorded from an independent extractor.
+set(DMG_TEST_ARTIFACTS "" CACHE PATH "Directory of vendor disk images and their manifests")
+if (DMG_TEST_ARTIFACTS)
+	enable_testing()
+	find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+	function(add_extract_test name image bundle)
+		get_filename_component(dir "${DMG_TEST_ARTIFACTS}/${image}" DIRECTORY)
+		add_test(NAME ${name}
+			COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/check-extract.py
+				$<TARGET_FILE:darling-dmg-extract> ${DMG_TEST_ARTIFACTS}/${image}
+				${dir}/bundle-content-manifest.json ${bundle})
+		set_tests_properties(${name} PROPERTIES ENVIRONMENT "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:dmg>")
+	endfunction()
+
+	# HFSX volume stored in LZMA chunks
+	add_extract_test(extract-firefox-159 firefox/159.0/Firefox-159.0.dmg Firefox.app)
+	# APFS volume in a GPT partition, stored in LZFSE chunks
+	add_extract_test(extract-coteditor-7.1.3 coteditor/7.1.3/CotEditor_7.1.3.dmg CotEditor.app)
+endif (DMG_TEST_ARTIFACTS)
+
 # This is used in Darling build.
 else (NOT DARLING)
 	include(darling_exe)
