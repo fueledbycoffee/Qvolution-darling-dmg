@@ -136,32 +136,47 @@ target_compile_features(darling-dmg-extract PRIVATE cxx_std_11)
 target_link_libraries(darling-dmg-extract dmg)
 install(TARGETS darling-dmg-extract RUNTIME DESTINATION bin)
 
-# Vendor disk images are too large to commit. Point DMG_TEST_ARTIFACTS at a directory
-# laid out as <app>/<version>/{<image>,bundle-content-manifest.json} to compare
-# darling-dmg-extract's output with manifests recorded from an independent extractor.
+# Vendor disk images are too large to commit. Point DMG_TEST_ARTIFACTS, DMG_TEST_INPUTS or both
+# at directories laid out as <app>/<version>/{<image>,bundle-content-manifest.json} to compare
+# darling-dmg-extract's output with manifests recorded from an independent extractor (7-Zip).
 set(DMG_TEST_ARTIFACTS "" CACHE PATH "Directory of vendor disk images and their manifests")
-if (DMG_TEST_ARTIFACTS)
+set(DMG_TEST_INPUTS "" CACHE PATH "Directory of regression disk images and their manifests")
+if (DMG_TEST_ARTIFACTS OR DMG_TEST_INPUTS)
 	if (NOT DMG_LZFSE_LIBRARIES)
-		message(FATAL_ERROR "DMG_TEST_ARTIFACTS needs lzfse, because the CotEditor image is "
+		message(FATAL_ERROR "The image tests need lzfse, because the CotEditor image is "
 			"stored in LZFSE chunks; add an lzfse install prefix to CMAKE_PREFIX_PATH")
 	endif ()
 	enable_testing()
 	find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
-	function(add_extract_test name image bundle)
-		get_filename_component(dir "${DMG_TEST_ARTIFACTS}/${image}" DIRECTORY)
+	function(add_extract_test name root image bundle)
+		get_filename_component(dir "${root}/${image}" DIRECTORY)
 		add_test(NAME ${name}
 			COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/check-extract.py
-				$<TARGET_FILE:darling-dmg-extract> ${DMG_TEST_ARTIFACTS}/${image}
+				$<TARGET_FILE:darling-dmg-extract> ${root}/${image}
 				${dir}/bundle-content-manifest.json ${bundle})
 		set_tests_properties(${name} PROPERTIES ENVIRONMENT "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:dmg>")
 	endfunction()
+endif ()
 
+if (DMG_TEST_ARTIFACTS)
 	# HFSX volume stored in LZMA chunks
-	add_extract_test(extract-firefox-159 firefox/159.0/Firefox-159.0.dmg Firefox.app)
+	add_extract_test(extract-firefox-159 ${DMG_TEST_ARTIFACTS} firefox/159.0/Firefox-159.0.dmg Firefox.app)
 	# APFS volume in a GPT partition, stored in LZFSE chunks
-	add_extract_test(extract-coteditor-7.1.3 coteditor/7.1.3/CotEditor_7.1.3.dmg CotEditor.app)
+	add_extract_test(extract-coteditor-7.1.3 ${DMG_TEST_ARTIFACTS} coteditor/7.1.3/CotEditor_7.1.3.dmg CotEditor.app)
 endif (DMG_TEST_ARTIFACTS)
+
+if (DMG_TEST_INPUTS)
+	# Partition names with fullwidth punctuation, read through the partition-map fallback
+	add_extract_test(extract-clipy-1.4.1 ${DMG_TEST_INPUTS} clipy/1.4.1/Clipy_1.4.1.dmg Clipy.app)
+	add_extract_test(extract-excalidrawz-2.5.1 ${DMG_TEST_INPUTS} excalidrawz/2.5.1/ExcalidrawZ.2.5.1.dmg ExcalidrawZ.app)
+	add_extract_test(extract-kubeterm-2.8.3 ${DMG_TEST_INPUTS} kubeterm/2.8.3/Kubeterm-v2.8.3-universal.dmg kubeterm.app)
+	add_extract_test(extract-mweb-pro-4.8.4 ${DMG_TEST_INPUTS} mweb-pro/4.8.4/MWebPro484.dmg "MWeb Pro.app")
+	# HFS+ partition named only "disk image"
+	add_extract_test(extract-dcommander-3.9.9.2 ${DMG_TEST_INPUTS} dcommander/3.9.9.2/DCommander-3992.dmg DCommander.app)
+	# A single blkx holding the whole disk
+	add_extract_test(extract-sonic3air-26.03.28 ${DMG_TEST_INPUTS} sonic3air/26.03.28.0/sonic3air_mac_260328.dmg "Sonic 3 AIR.app")
+endif (DMG_TEST_INPUTS)
 
 # This is used in Darling build.
 else (NOT DARLING)
