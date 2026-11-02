@@ -15,6 +15,7 @@ public:
 	APFSBTreeNode(std::vector<uint8_t> block, uint16_t fixedKeySize, uint16_t fixedValueSize);
 
 	inline bool isLeaf() const { return m_flags & BTNODE_LEAF; }
+	inline bool hasFixedSizeEntries() const { return m_flags & BTNODE_FIXED_KV_SIZE; }
 	inline uint16_t level() const { return m_level; }
 	inline uint32_t count() const { return m_count; }
 

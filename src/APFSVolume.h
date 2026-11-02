@@ -24,7 +24,6 @@ private:
 
 	// Visits every file-system record of one object and record type, in key order.
 	void forEachRecord(oid_t oid, uint8_t type, const RecordVisitor& visit);
-	void visitNode(oid_t node, int expectedLevel, uint64_t target, const RecordVisitor& visit);
 
 	oid_t lookup(const std::string& path);
 	std::map<std::string, oid_t> directoryEntries(oid_t directory);

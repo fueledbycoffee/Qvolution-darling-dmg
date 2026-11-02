@@ -94,15 +94,20 @@ uint64_t dstreamSize(const std::vector<uint8_t>& inode)
 	const size_t blobStart = sizeof(j_inode_val_t);
 	xf_blob_t blob;
 
-	if (inode.size() < blobStart + sizeof(blob))
+	// An inode without extended fields ends with j_inode_val_t; any tail must be a whole blob.
+	if (inode.size() == blobStart)
 		return 0;
+	if (inode.size() < blobStart + sizeof(blob))
+		throw io_error("APFS inode extended fields are truncated");
 	memcpy(&blob, &inode[blobStart], sizeof(blob));
 
-	// The x_field_t array is followed by the values, each padded to a multiple of 8 bytes.
+	// The x_field_t array is followed by xf_used_data bytes of values, each padded to a
+	// multiple of 8 bytes.
 	size_t fieldStart = blobStart + sizeof(blob);
 	size_t valueStart = fieldStart + le(blob.xf_num_exts) * sizeof(x_field_t);
+	size_t valueEnd = valueStart + le(blob.xf_used_data);
 
-	if (valueStart > inode.size())
+	if (valueEnd > inode.size())
 		throw io_error("APFS inode extended fields are out of bounds");
 
 	for (uint16_t i = 0; i < le(blob.xf_num_exts); i++)
@@ -110,7 +115,7 @@ uint64_t dstreamSize(const std::vector<uint8_t>& inode)
 		x_field_t field;
 
 		memcpy(&field, &inode[fieldStart + i * sizeof(field)], sizeof(field));
-		if (valueStart + le(field.x_size) > inode.size())
+		if (le(field.x_size) > valueEnd - valueStart)
 			throw io_error("APFS inode extended fields are out of bounds");
 
 		if (field.x_type == INO_EXT_TYPE_DSTREAM)
@@ -122,7 +127,7 @@ uint64_t dstreamSize(const std::vector<uint8_t>& inode)
 			memcpy(&dstream, &inode[valueStart], sizeof(dstream));
 			return le(dstream.size);
 		}
-		valueStart += (le(field.x_size) + 7) & ~size_t(7);
+		valueStart += std::min<size_t>((le(field.x_size) + 7) & ~size_t(7), valueEnd - valueStart);
 	}
 	return 0;
 }
@@ -156,50 +161,70 @@ APFSVolume::APFSVolume(std::shared_ptr<APFSContainer> container, oid_t volumeOid
 
 void APFSVolume::forEachRecord(oid_t oid, uint8_t type, const RecordVisitor& visit)
 {
-	visitNode(m_rootTree, -1, (oid << 4) | type, visit);
-}
+	if (oid & ~OBJ_ID_MASK)
+		throw io_error("Invalid APFS object identifier " + std::to_string(oid));
 
-void APFSVolume::visitNode(oid_t node, int expectedLevel, uint64_t target, const RecordVisitor& visit)
-{
-	std::vector<uint8_t> block;
-	paddr_t paddr = m_virtualTree ? m_container->resolve(m_omap, node) : paddr_t(node);
-	uint32_t type = m_container->readObject(paddr, block);
+	const uint64_t target = (oid << 4) | type;
+	// Nodes still to read, with their expected level, the next one last, so that records
+	// are visited in key order without recursion.
+	std::vector<std::pair<oid_t, int>> pending { { m_rootTree, -1 } };
+	// A lookup reads only nodes whose key range covers its records, each once, and every
+	// node is a block of its own: reading more nodes than the container has blocks means
+	// the tree loops or shares nodes.
+	uint64_t budget = m_container->blockCount();
 
-	if (type != OBJECT_TYPE_BTREE && type != OBJECT_TYPE_BTREE_NODE)
-		throw io_error("APFS file-system tree node expected at block " + std::to_string(paddr));
-
-	APFSBTreeNode btn(std::move(block), 0, 0);
-	if (expectedLevel >= 0 && btn.level() != expectedLevel)
-		throw io_error("APFS file-system tree node has an unexpected level");
-
-	for (uint32_t i = 0; i < btn.count(); i++)
+	while (!pending.empty())
 	{
-		uint16_t keyLength, valueLength;
-		const uint8_t* key = btn.key(i, &keyLength);
-		uint64_t order = keyOrder(key, keyLength);
+		oid_t node = pending.back().first;
+		int expectedLevel = pending.back().second;
+		std::vector<uint8_t> block;
+		std::vector<oid_t> children;
 
-		if (order > target)
-			break;
+		pending.pop_back();
+		if (budget-- == 0)
+			throw io_error("APFS file-system tree lookup reads more nodes than the container has blocks");
 
-		if (btn.isLeaf())
+		paddr_t paddr = m_virtualTree ? m_container->resolve(m_omap, node) : paddr_t(node);
+		uint32_t type = m_container->readObject(paddr, block);
+		if (type != OBJECT_TYPE_BTREE && type != OBJECT_TYPE_BTREE_NODE)
+			throw io_error("APFS file-system tree node expected at block " + std::to_string(paddr));
+
+		APFSBTreeNode btn(std::move(block), 0, 0);
+		if (expectedLevel >= 0 && btn.level() != expectedLevel)
+			throw io_error("APFS file-system tree node has an unexpected level");
+
+		for (uint32_t i = 0; i < btn.count(); i++)
 		{
-			if (order == target)
+			uint16_t keyLength, valueLength;
+			const uint8_t* key = btn.key(i, &keyLength);
+			uint64_t order = keyOrder(key, keyLength);
+
+			if (order > target)
+				break;
+
+			if (btn.isLeaf())
 			{
-				const uint8_t* value = btn.value(i, &valueLength);
-				visit(key, keyLength, value, valueLength);
+				if (order == target)
+				{
+					const uint8_t* value = btn.value(i, &valueLength);
+					visit(key, keyLength, value, valueLength);
+				}
+			}
+			else
+			{
+				// Child i holds the keys from entry i up to entry i+1.
+				if (i + 1 < btn.count())
+				{
+					const uint8_t* nextKey = btn.key(i + 1, &keyLength);
+					if (keyOrder(nextKey, keyLength) < target)
+						continue;
+				}
+				children.push_back(btn.child(i));
 			}
 		}
-		else
-		{
-			// Child i holds the keys from entry i up to entry i+1.
-			if (i + 1 < btn.count())
-			{
-				const uint8_t* nextKey = btn.key(i + 1, &keyLength);
-				if (keyOrder(nextKey, keyLength) < target)
-					continue;
-			}
-			visitNode(btn.child(i), btn.level() - 1, target, visit);
-		}
+
+		for (auto it = children.rbegin(); it != children.rend(); ++it)
+			pending.emplace_back(*it, btn.level() - 1);
 	}
 }
 
@@ -230,7 +255,8 @@ std::map<std::string, oid_t> APFSVolume::directoryEntries(oid_t directory)
 		else
 			throw io_error("Malformed APFS directory record key");
 
-		if (nameLength == 0 || name[nameLength - 1] != 0 || valueLength < sizeof(val))
+		// The name must be non-empty and end at its only NUL, so it cannot change meaning as a path.
+		if (nameLength < 2 || name[nameLength - 1] != 0 || memchr(name, 0, nameLength - 1) || valueLength < sizeof(val))
 			throw io_error("Malformed APFS directory record");
 
 		memcpy(&val, value, sizeof(val));
@@ -332,6 +358,8 @@ std::string APFSVolume::symlinkTarget(oid_t oid)
 
 	if (!xattr(oid, SYMLINK_EA_NAME, data) || data.empty() || data.back() != 0)
 		throw io_error("APFS symbolic link " + std::to_string(oid) + " has no target");
+	if (memchr(data.data(), 0, data.size() - 1))
+		throw io_error("APFS symbolic link " + std::to_string(oid) + " has a NUL in its target");
 	return std::string(data.begin(), data.end() - 1);
 }
 
@@ -344,16 +372,39 @@ std::shared_ptr<Reader> APFSVolume::openStream(oid_t streamId, uint64_t size)
 		j_file_extent_key_t k;
 		j_file_extent_val_t v;
 
-		if (keyLength != sizeof(k) || valueLength < sizeof(v))
+		if (keyLength != sizeof(k) || valueLength != sizeof(v))
 			throw io_error("Malformed APFS file extent record");
 		memcpy(&k, key, sizeof(k));
 		memcpy(&v, value, sizeof(v));
 
+		uint64_t logical = le(k.logical_addr);
+		uint64_t length = le(v.len_and_flags) & J_FILE_EXTENT_LEN_MASK;
+		uint64_t block = le(v.phys_block_num);
+		uint64_t blockSize = m_container->blockSize();
+
+		// The reference defines no extent flags, and requires lengths in whole blocks.
+		if (le(v.len_and_flags) >> J_FILE_EXTENT_FLAG_SHIFT)
+			throw io_error("APFS file extent has unknown flags");
+		if (length == 0 || length % blockSize)
+			throw io_error("APFS file extent length is not a whole number of blocks");
 		// Block zero holds the container superblock, so no extent can start there.
-		if (!le(v.phys_block_num))
+		if (block == 0)
 			throw io_error("APFS file extent points at block zero");
-		extents[le(k.logical_addr)] = APFSFileReader::Extent{ le(v.len_and_flags) & J_FILE_EXTENT_LEN_MASK, paddr_t(le(v.phys_block_num)) };
+		if (block >= m_container->blockCount() || length / blockSize > m_container->blockCount() - block)
+			throw io_error("APFS file extent lies outside the container");
+		if (logical > UINT64_MAX - length)
+			throw io_error("APFS file extent ends beyond the largest file offset");
+		if (!extents.emplace(logical, APFSFileReader::Extent{ length, paddr_t(block) }).second)
+			throw io_error("APFS file has two extents at one offset");
 	});
+
+	uint64_t end = 0;
+	for (const auto& extent : extents)
+	{
+		if (extent.first < end)
+			throw io_error("APFS file extents overlap");
+		end = extent.first + extent.second.length;
+	}
 
 	return std::make_shared<APFSFileReader>(m_container->reader(), m_container->blockSize(), std::move(extents), size);
 }

@@ -294,6 +294,7 @@ struct j_file_extent_key_t
 };
 
 #define J_FILE_EXTENT_LEN_MASK 0x00ffffffffffffffULL
+#define J_FILE_EXTENT_FLAG_SHIFT 56
 
 struct j_file_extent_val_t
 {

@@ -16,6 +16,8 @@ public:
 	static bool isAPFS(std::shared_ptr<Reader> reader);
 
 	inline uint32_t blockSize() const { return m_blockSize; }
+	// Number of blocks in the container; every valid physical address is below it.
+	inline uint64_t blockCount() const { return m_blockCount; }
 	inline std::shared_ptr<Reader> reader() { return m_reader; }
 
 	// Virtual object identifiers of the container's volumes.
@@ -30,10 +32,12 @@ public:
 	paddr_t resolve(paddr_t omapPaddr, oid_t oid);
 private:
 	void readBlock(paddr_t paddr, std::vector<uint8_t>& block);
+	void setBlockCount(uint64_t blockCount);
 	static bool checksumValid(const std::vector<uint8_t>& block);
 private:
 	std::shared_ptr<Reader> m_reader;
 	uint32_t m_blockSize;
+	uint64_t m_blockCount;
 	nx_superblock_t m_superblock;
 };
 

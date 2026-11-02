@@ -14,9 +14,12 @@ APFSContainer::APFSContainer(std::shared_ptr<Reader> reader)
 	std::vector<uint8_t> block;
 	const nx_superblock_t* sb;
 	uint32_t descBlocks;
+	paddr_t descBase;
 	xid_t bestXid = 0;
 
 	// Block zero holds a copy of the superblock, which locates the checkpoint descriptor area.
+	// It may be an older copy than the latest checkpoint, but it must be intact.
+	m_blockCount = m_reader->length() / m_blockSize;
 	readBlock(0, block);
 	sb = reinterpret_cast<const nx_superblock_t*>(block.data());
 	if (le(sb->nx_magic) != NX_MAGIC)
@@ -25,15 +28,22 @@ APFSContainer::APFSContainer(std::shared_ptr<Reader> reader)
 	m_blockSize = le(sb->nx_block_size);
 	if (m_blockSize < NX_MINIMUM_BLOCK_SIZE || m_blockSize > NX_MAXIMUM_BLOCK_SIZE || (m_blockSize & (m_blockSize - 1)))
 		throw io_error("Invalid APFS block size: " + std::to_string(m_blockSize));
-	readBlock(0, block);
+	m_blockCount = m_reader->length() / m_blockSize;
+	if (readObject(0, block) != OBJECT_TYPE_NX_SUPERBLOCK)
+		throw io_error("APFS block zero is not a container superblock");
 	sb = reinterpret_cast<const nx_superblock_t*>(block.data());
+	if (le(sb->nx_magic) != NX_MAGIC || le(sb->nx_block_size) != m_blockSize)
+		throw io_error("APFS block zero changed between reads");
+	setBlockCount(le(sb->nx_block_count));
 
 	descBlocks = le(sb->nx_xp_desc_blocks);
 	if (descBlocks & XP_DESC_NONCONTIGUOUS)
 		throw function_not_implemented_error("Noncontiguous APFS checkpoint descriptor areas are not supported");
+	descBase = le(sb->nx_xp_desc_base);
+	if (descBase < 0 || uint64_t(descBase) >= m_blockCount || descBlocks > m_blockCount - uint64_t(descBase))
+		throw io_error("APFS checkpoint descriptor area lies outside the container");
 
 	// The latest checkpoint is the valid superblock with the highest transaction identifier.
-	paddr_t descBase = le(sb->nx_xp_desc_base);
 	for (uint32_t i = 0; i < descBlocks; i++)
 	{
 		std::vector<uint8_t> candidate;
@@ -56,6 +66,15 @@ APFSContainer::APFSContainer(std::shared_ptr<Reader> reader)
 		throw io_error("APFS container has no valid checkpoint");
 	if (le(m_superblock.nx_incompatible_features) != NX_INCOMPAT_VERSION2)
 		throw function_not_implemented_error("Unsupported APFS container features: " + std::to_string(le(m_superblock.nx_incompatible_features)));
+	setBlockCount(le(m_superblock.nx_block_count));
+}
+
+// Every physical address is checked against the container's size, which must fit in the partition.
+void APFSContainer::setBlockCount(uint64_t blockCount)
+{
+	if (blockCount == 0 || blockCount > m_reader->length() / m_blockSize)
+		throw io_error("APFS container is larger than its partition");
+	m_blockCount = blockCount;
 }
 
 bool APFSContainer::isAPFS(std::shared_ptr<Reader> reader)
@@ -82,8 +101,11 @@ std::vector<oid_t> APFSContainer::volumes() const
 
 void APFSContainer::readBlock(paddr_t paddr, std::vector<uint8_t>& block)
 {
+	if (paddr < 0 || uint64_t(paddr) >= m_blockCount)
+		throw io_error("APFS block " + std::to_string(paddr) + " lies outside the container");
+
 	block.resize(m_blockSize);
-	if (paddr < 0 || m_reader->read(block.data(), m_blockSize, uint64_t(paddr) * m_blockSize) != int32_t(m_blockSize))
+	if (m_reader->read(block.data(), m_blockSize, uint64_t(paddr) * m_blockSize) != int32_t(m_blockSize))
 		throw io_error("Cannot read APFS block " + std::to_string(paddr));
 }
 
@@ -131,6 +153,7 @@ paddr_t APFSContainer::resolve(paddr_t omapPaddr, oid_t oid)
 		throw io_error("APFS object map tree is not physical");
 	node = le(omap->om_tree_oid);
 
+	// Levels strictly decrease on the way down, so this descends at most 65536 nodes.
 	while (true)
 	{
 		uint32_t type = readObject(node, block);
@@ -138,6 +161,8 @@ paddr_t APFSContainer::resolve(paddr_t omapPaddr, oid_t oid)
 			throw io_error("APFS B-tree node expected at block " + std::to_string(node));
 
 		APFSBTreeNode btn(std::move(block), sizeof(omap_key_t), sizeof(omap_val_t));
+		if (!btn.hasFixedSizeEntries())
+			throw io_error("APFS object map node does not have fixed-size entries");
 		if (expectedLevel >= 0 && btn.level() != expectedLevel)
 			throw io_error("APFS object map node has an unexpected level");
 
@@ -147,12 +172,17 @@ paddr_t APFSContainer::resolve(paddr_t omapPaddr, oid_t oid)
 		for (uint32_t i = 0; i < btn.count(); i++)
 		{
 			uint16_t length;
-			const omap_key_t* k = reinterpret_cast<const omap_key_t*>(btn.key(i, &length));
+			const uint8_t* k = btn.key(i, &length);
+			omap_key_t candidate;
 
-			if (le(k->ok_oid) > oid || (le(k->ok_oid) == oid && le(k->ok_xid) > xid))
+			if (length != sizeof(candidate))
+				throw io_error("APFS object map key has the wrong size");
+			memcpy(&candidate, k, sizeof(candidate));
+
+			if (le(candidate.ok_oid) > oid || (le(candidate.ok_oid) == oid && le(candidate.ok_xid) > xid))
 				break;
 			found = i;
-			key = *k;
+			key = candidate;
 		}
 		if (found < 0 || (btn.isLeaf() && le(key.ok_oid) != oid))
 			throw io_error("APFS object " + std::to_string(oid) + " is not in the object map");
@@ -160,13 +190,18 @@ paddr_t APFSContainer::resolve(paddr_t omapPaddr, oid_t oid)
 		if (btn.isLeaf())
 		{
 			uint16_t length;
-			const omap_val_t* val = reinterpret_cast<const omap_val_t*>(btn.value(found, &length));
+			const uint8_t* v = btn.value(found, &length);
+			omap_val_t val;
 
-			if (le(val->ov_flags) & OMAP_VAL_DELETED)
+			if (length != sizeof(val))
+				throw io_error("APFS object map value has the wrong size");
+			memcpy(&val, v, sizeof(val));
+
+			if (le(val.ov_flags) & OMAP_VAL_DELETED)
 				throw io_error("APFS object " + std::to_string(oid) + " has been deleted");
-			if (le(val->ov_flags) & OMAP_VAL_ENCRYPTED)
+			if (le(val.ov_flags) & OMAP_VAL_ENCRYPTED)
 				throw function_not_implemented_error("Encrypted APFS objects are not supported");
-			return le(val->ov_paddr);
+			return le(val.ov_paddr);
 		}
 
 		node = btn.child(found);

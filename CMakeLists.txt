@@ -143,6 +143,11 @@ target_include_directories(xz-run-test PRIVATE src)
 target_link_libraries(xz-run-test dmg -llzma)
 add_test(NAME xz-runs COMMAND xz-run-test)
 set_tests_properties(xz-runs PROPERTIES ENVIRONMENT "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:dmg>")
+add_executable(apfs-parser-test test/apfs-parser-test.cpp)
+target_include_directories(apfs-parser-test PRIVATE src)
+target_link_libraries(apfs-parser-test dmg)
+add_test(NAME apfs-parser COMMAND apfs-parser-test)
+set_tests_properties(apfs-parser PROPERTIES ENVIRONMENT "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:dmg>")
 
 # Vendor disk images are too large to commit. Point DMG_TEST_ARTIFACTS, DMG_TEST_INPUTS or both
 # at directories laid out as <app>/<version>/{<image>,bundle-content-manifest.json} to compare

@@ -82,7 +82,7 @@ oid_t APFSBTreeNode::child(uint32_t index) const
 	const uint8_t* data = value(index, &length);
 	oid_t oid;
 
-	if (isLeaf() || length < sizeof(oid))
+	if (isLeaf() || length != sizeof(oid))
 		throw io_error("APFS B-tree entry is not a child pointer");
 
 	memcpy(&oid, data, sizeof(oid));
