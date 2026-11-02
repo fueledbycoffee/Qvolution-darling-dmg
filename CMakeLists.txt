@@ -97,7 +97,7 @@ add_library(dmg SHARED
 	src/HFSHighLevelVolume.cpp
 )
 target_compile_features(dmg PRIVATE cxx_std_11)
-target_link_libraries(dmg -licuuc -lcrypto -lz -lbz2 ${LIBXML2_LIBRARY})
+target_link_libraries(dmg -licuuc -lcrypto -lz -lbz2 -llzma ${LIBXML2_LIBRARY})
 install(TARGETS dmg DESTINATION lib)
 
 add_executable(darling-dmg
@@ -167,7 +167,7 @@ else (NOT DARLING)
 	else()
 		target_compile_definitions(hdiutil PRIVATE DARLING_DMG_NO_FUSE)
 	endif()
-	target_link_libraries(hdiutil icucore z bz2 crypto44 xml2 iconv lzfse)
+	target_link_libraries(hdiutil icucore z bz2 crypto44 xml2 iconv lzfse lzma)
 	install(TARGETS hdiutil DESTINATION libexec/darling/usr/bin)
 
 endif (NOT DARLING)

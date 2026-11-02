@@ -1,6 +1,7 @@
 #include "DMGDecompressor.h"
 #include <zlib.h>
 #include <bzlib.h>
+#include <lzma.h>
 #ifdef COMPILE_WITH_LZFSE
 	#include <lzfse.h>
 #endif
@@ -36,6 +37,17 @@ private:
 	bz_stream m_strm;
 };
 
+class DMGDecompressor_LZMA : public DMGDecompressor
+{
+public:
+	DMGDecompressor_LZMA(std::shared_ptr<Reader> reader);
+	~DMGDecompressor_LZMA();
+	virtual int32_t decompress(void* output, int32_t count, int64_t offset) override;
+private:
+	virtual int32_t decompress(void* output, int32_t count);
+	lzma_stream m_strm;
+};
+
 class DMGDecompressor_ADC : public DMGDecompressor
 {
 public:
@@ -67,6 +79,8 @@ DMGDecompressor* DMGDecompressor::create(RunType runType, std::shared_ptr<Reader
 			return new DMGDecompressor_Bzip2(reader);
 		case RunType::ADC:
 			return new DMGDecompressor_ADC(reader);
+		case RunType::LZMA:
+			return new DMGDecompressor_LZMA(reader);
 #ifdef COMPILE_WITH_LZFSE
 		case RunType::LZFSE:
 			return new DMGDecompressor_LZFSE(reader);
@@ -234,6 +248,62 @@ int32_t DMGDecompressor_Bzip2::decompress(void* output, int32_t count, int64_t o
 	}
 	int32_t bytesDecompressed = decompress((uint8_t*)output, count);
 	return bytesDecompressed;
+}
+
+DMGDecompressor_LZMA::DMGDecompressor_LZMA(std::shared_ptr<Reader> reader)
+	: DMGDecompressor(reader), m_strm(LZMA_STREAM_INIT)
+{
+	if (lzma_stream_decoder(&m_strm, UINT64_MAX, 0) != LZMA_OK)
+		throw std::bad_alloc();
+}
+
+DMGDecompressor_LZMA::~DMGDecompressor_LZMA()
+{
+	lzma_end(&m_strm);
+}
+
+int32_t DMGDecompressor_LZMA::decompress(void* output, int32_t count)
+{
+	lzma_ret status;
+	char* input;
+	int bytesRead;
+
+	m_strm.next_out = (uint8_t*) output;
+	m_strm.avail_out = count;
+	do
+	{
+		if (m_strm.avail_in == 0)
+		{
+			bytesRead = readSome(&input);
+			processed(bytesRead);
+			m_strm.next_in = (uint8_t*)input;
+			m_strm.avail_in = (size_t)bytesRead;
+		}
+
+		status = lzma_code(&m_strm, LZMA_RUN);
+
+		if (status == LZMA_STREAM_END)
+			return count - m_strm.avail_out;
+		else if (status != LZMA_OK)
+			throw io_error("Error decoding xz stream");
+	}
+	while (m_strm.avail_out > 0);
+
+	return count;
+}
+
+int32_t DMGDecompressor_LZMA::decompress(void* output, int32_t count, int64_t offset)
+{
+	while (offset > 0)
+	{
+		char waste[4096];
+		int32_t to_read = std::min(int64_t(sizeof(waste)), offset);
+		int32_t bytesDecompressed = decompress(waste, to_read);
+		if (bytesDecompressed <= 0)
+			return bytesDecompressed;
+		offset -= bytesDecompressed;
+	}
+	return decompress(output, count);
 }
 
 int32_t DMGDecompressor_ADC::decompress(void* output, int32_t count, int64_t offset)

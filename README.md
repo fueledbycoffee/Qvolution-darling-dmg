@@ -24,6 +24,7 @@ Read only access only.
 | OpenSSL    |                      | Base64 decoding                    |
 | Bzip2      |                      | Decompression                      |
 | Zlib       |                      | Decompression                      |
+| liblzma    |                      | Decompression (xz)                 |
 | FUSE       | 2.x (not 3.x)        | Userspace filesystem support       |
 | libicu     |                      | Unicode support                    |
 | libxml2    |                      | XML (property list) parsing        |

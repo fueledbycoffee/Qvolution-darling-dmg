@@ -121,6 +121,7 @@ int32_t DMGPartition::readRun(void* buf, int32_t runIndex, uint64_t offsetInSect
 		case RunType::Zlib:
 		case RunType::Bzip2:
 		case RunType::ADC:
+		case RunType::LZMA:
 		{
 			std::unique_ptr<DMGDecompressor> decompressor;
 			std::shared_ptr<Reader> subReader;
