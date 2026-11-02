@@ -19,7 +19,7 @@ public:
 	static bool isDMG(std::shared_ptr<Reader> reader);
 private:
 	void loadKoly(const UDIFResourceFile& koly);
-	bool loadPartitionElements(xmlXPathContextPtr xpathContext, xmlNodeSetPtr nodes);
+	bool loadPartitionElements(xmlXPathContextPtr xpathContext, xmlNodeSetPtr nodes, bool namesAreTypes);
 	static bool parseNameAndType(const std::string& nameAndType, std::string& name, std::string& type);
 	static bool base64Decode(const std::string& input, std::vector<uint8_t>& output);
 	BLKXTable* loadBLKXTableForPartition(int index);

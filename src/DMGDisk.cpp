@@ -71,10 +71,7 @@ void DMGDisk::loadKoly(const UDIFResourceFile& koly)
 			"/following-sibling::array[1]/dict[key[text()='ID']/following-sibling::string[1][text() >= 0]]", xpathContext);
 
 	if (xpathObj && xpathObj->nodesetval)
-		simpleWayOK = loadPartitionElements(xpathContext, xpathObj->nodesetval);
-	
-	xmlXPathFreeObject(xpathObj);
-	xmlXPathFreeContext(xpathContext);
+		simpleWayOK = loadPartitionElements(xpathContext, xpathObj->nodesetval, false);
 //#else
 	
 	if (!simpleWayOK)
@@ -83,6 +80,11 @@ void DMGDisk::loadKoly(const UDIFResourceFile& koly)
 		PartitionedDisk* pdisk;
 
 		rm1 = readerForKolyBlock(-1);
+
+		// Without a partition map entry to fall back on, take each name as the partition type:
+		// current hdiutil names entries by type alone, as in "Apple_APFS".
+		if (!rm1 && xpathObj && xpathObj->nodesetval)
+			loadPartitionElements(xpathContext, xpathObj->nodesetval, true);
 
 		if (rm1)
 		{
@@ -105,9 +107,12 @@ void DMGDisk::loadKoly(const UDIFResourceFile& koly)
 		}	
 	}
 //#endif
+
+	xmlXPathFreeObject(xpathObj);
+	xmlXPathFreeContext(xpathContext);
 }
 
-bool DMGDisk::loadPartitionElements(xmlXPathContextPtr xpathContext, xmlNodeSetPtr nodes)
+bool DMGDisk::loadPartitionElements(xmlXPathContextPtr xpathContext, xmlNodeSetPtr nodes, bool namesAreTypes)
 {
 	for (int i = 0; i < nodes->nodeNr; i++)
 	{
@@ -136,7 +141,9 @@ bool DMGDisk::loadPartitionElements(xmlXPathContextPtr xpathContext, xmlNodeSetP
 			part.size = be(table->sectorCount) * 512;
 		}
 
-		if (!parseNameAndType((const char*) xpathObj->stringval, part.name, part.type) && m_partitions.empty())
+		if (namesAreTypes)
+			part.name = part.type = (const char*) xpathObj->stringval;
+		else if (!parseNameAndType((const char*) xpathObj->stringval, part.name, part.type) && m_partitions.empty())
 			return false;
 		m_partitions.push_back(part);
 
@@ -149,17 +156,12 @@ bool DMGDisk::loadPartitionElements(xmlXPathContextPtr xpathContext, xmlNodeSetP
 
 bool DMGDisk::parseNameAndType(const std::string& nameAndType, std::string& name, std::string& type)
 {
-	// Format: "Apple (Apple_partition_map : 1)", or just the type, as in "Apple_APFS"
+	// Format: "Apple (Apple_partition_map : 1)"
 	size_t paren = nameAndType.find('(');
 	size_t colon, space;
 
 	if (paren == std::string::npos)
-	{
-		if (nameAndType.empty())
-			return false;
-		name = type = nameAndType;
-		return true;
-	}
+		return false;
 
 	name = nameAndType.substr(0, paren-1);
 	colon = nameAndType.find(':', paren);
