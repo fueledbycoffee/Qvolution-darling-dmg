@@ -92,7 +92,8 @@ void copyDirectory(Volume& volume, const std::string& source,
                    const std::string& destination) {
     for (const auto& entry : volume.listDirectory(source)) {
         const std::string& name = entry.first;
-        if (name.empty() || name == "." || name == ".." || name.find('/') != std::string::npos)
+        if (name.empty() || name == "." || name == ".." || name.find('/') != std::string::npos ||
+            name.find('\0') != std::string::npos)
             throw std::runtime_error("invalid image entry name: " + name);
         std::string childSource = source == "/" ? "/" + name : source + "/" + name;
         std::string childDestination = destination + "/" + name;
