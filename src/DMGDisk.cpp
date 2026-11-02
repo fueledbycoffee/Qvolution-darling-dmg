@@ -149,12 +149,17 @@ bool DMGDisk::loadPartitionElements(xmlXPathContextPtr xpathContext, xmlNodeSetP
 
 bool DMGDisk::parseNameAndType(const std::string& nameAndType, std::string& name, std::string& type)
 {
-	// Format: "Apple (Apple_partition_map : 1)"
+	// Format: "Apple (Apple_partition_map : 1)", or just the type, as in "Apple_APFS"
 	size_t paren = nameAndType.find('(');
 	size_t colon, space;
 
 	if (paren == std::string::npos)
-		return false;
+	{
+		if (nameAndType.empty())
+			return false;
+		name = type = nameAndType;
+		return true;
+	}
 
 	name = nameAndType.substr(0, paren-1);
 	colon = nameAndType.find(':', paren);
