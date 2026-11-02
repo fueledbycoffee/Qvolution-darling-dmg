@@ -10,6 +10,7 @@
 #include <memory>
 #include <algorithm>
 #include <stdexcept>
+#include <string>
 #include <vector>
 #include <iostream>
 #include "exceptions.h"
@@ -43,9 +44,12 @@ public:
 	DMGDecompressor_LZMA(std::shared_ptr<Reader> reader);
 	~DMGDecompressor_LZMA();
 	virtual int32_t decompress(void* output, int32_t count, int64_t offset) override;
+	virtual void verifyEnd() override;
 private:
 	virtual int32_t decompress(void* output, int32_t count);
+	void fillInput();
 	lzma_stream m_strm;
+	bool m_ended = false;
 };
 
 class DMGDecompressor_ADC : public DMGDecompressor
@@ -250,10 +254,23 @@ int32_t DMGDecompressor_Bzip2::decompress(void* output, int32_t count, int64_t o
 	return bytesDecompressed;
 }
 
+// The decoder's memory is mostly its dictionary, whose size the compressed data chooses.
+// Firefox's 1 MiB runs decode within 16 MiB; 128 MiB also admits xz's largest preset
+// (-9e, a 64 MiB dictionary) and rejects data that asks for more.
+static const uint64_t LZMA_MEMORY_LIMIT = uint64_t(128) << 20;
+
+static void checkLZMA(lzma_ret status)
+{
+	if (status == LZMA_MEMLIMIT_ERROR)
+		throw io_error("xz run needs more than 128 MiB to decode");
+	if (status != LZMA_OK && status != LZMA_STREAM_END)
+		throw io_error("Error decoding xz stream: " + std::to_string(status));
+}
+
 DMGDecompressor_LZMA::DMGDecompressor_LZMA(std::shared_ptr<Reader> reader)
 	: DMGDecompressor(reader), m_strm(LZMA_STREAM_INIT)
 {
-	if (lzma_stream_decoder(&m_strm, UINT64_MAX, 0) != LZMA_OK)
+	if (lzma_stream_decoder(&m_strm, LZMA_MEMORY_LIMIT, 0) != LZMA_OK)
 		throw std::bad_alloc();
 }
 
@@ -262,34 +279,72 @@ DMGDecompressor_LZMA::~DMGDecompressor_LZMA()
 	lzma_end(&m_strm);
 }
 
+void DMGDecompressor_LZMA::fillInput()
+{
+	char* input;
+	int bytesRead = readSome(&input);
+
+	processed(bytesRead);
+	m_strm.next_in = (uint8_t*)input;
+	m_strm.avail_in = (size_t)bytesRead;
+}
+
 int32_t DMGDecompressor_LZMA::decompress(void* output, int32_t count)
 {
 	lzma_ret status;
-	char* input;
-	int bytesRead;
+
+	if (m_ended)
+		return 0;
 
 	m_strm.next_out = (uint8_t*) output;
 	m_strm.avail_out = count;
 	do
 	{
 		if (m_strm.avail_in == 0)
-		{
-			bytesRead = readSome(&input);
-			processed(bytesRead);
-			m_strm.next_in = (uint8_t*)input;
-			m_strm.avail_in = (size_t)bytesRead;
-		}
+			fillInput();
 
 		status = lzma_code(&m_strm, LZMA_RUN);
+		checkLZMA(status);
 
 		if (status == LZMA_STREAM_END)
+		{
+			m_ended = true;
 			return count - m_strm.avail_out;
-		else if (status != LZMA_OK)
-			throw io_error("Error decoding xz stream");
+		}
 	}
 	while (m_strm.avail_out > 0);
 
 	return count;
+}
+
+// A run's xz stream must end, with its index and footer intact, exactly at the run's last
+// byte, and nothing may follow it in the run.
+void DMGDecompressor_LZMA::verifyEnd()
+{
+	while (!m_ended)
+	{
+		uint8_t excess;
+
+		if (m_strm.avail_in == 0)
+		{
+			if (consumed() >= readerLength())
+				throw io_error("xz run ends before its stream does");
+			fillInput();
+		}
+
+		m_strm.next_out = &excess;
+		m_strm.avail_out = sizeof(excess);
+		lzma_ret status = lzma_code(&m_strm, LZMA_RUN);
+		checkLZMA(status);
+
+		if (m_strm.avail_out == 0)
+			throw io_error("xz run holds more data than its sectors");
+		if (status == LZMA_STREAM_END)
+			m_ended = true;
+	}
+
+	if (m_strm.avail_in != 0 || consumed() < readerLength())
+		throw io_error("xz run has data after the end of its stream");
 }
 
 int32_t DMGDecompressor_LZMA::decompress(void* output, int32_t count, int64_t offset)

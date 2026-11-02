@@ -141,6 +141,8 @@ int32_t DMGPartition::readRun(void* buf, int32_t runIndex, uint64_t offsetInSect
 			int32_t dec = decompressor->decompress((uint8_t*)buf, count, offsetInSector);
 			if (dec < count)
 				throw io_error("Error decompressing stream");
+			if (offsetInSector + count == compLength)
+				decompressor->verifyEnd();
 			return count;
 		}
 		default:

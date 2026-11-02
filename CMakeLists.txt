@@ -136,6 +136,14 @@ target_compile_features(darling-dmg-extract PRIVATE cxx_std_11)
 target_link_libraries(darling-dmg-extract dmg)
 install(TARGETS darling-dmg-extract RUNTIME DESTINATION bin)
 
+# Parser tests that need neither vendor images nor extra libraries
+enable_testing()
+add_executable(xz-run-test test/xz-run-test.cpp)
+target_include_directories(xz-run-test PRIVATE src)
+target_link_libraries(xz-run-test dmg -llzma)
+add_test(NAME xz-runs COMMAND xz-run-test)
+set_tests_properties(xz-runs PROPERTIES ENVIRONMENT "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:dmg>")
+
 # Vendor disk images are too large to commit. Point DMG_TEST_ARTIFACTS, DMG_TEST_INPUTS or both
 # at directories laid out as <app>/<version>/{<image>,bundle-content-manifest.json} to compare
 # darling-dmg-extract's output with manifests recorded from an independent extractor (7-Zip).
