@@ -30,6 +30,10 @@ set(dmg_sources
 	src/CachedReader.cpp
 
 	src/HFSHighLevelVolume.cpp
+
+	src/APFSBTreeNode.cpp
+	src/APFSContainer.cpp
+	src/APFSVolume.cpp
 )
 
 
@@ -95,6 +99,10 @@ add_library(dmg SHARED
 	src/CachedReader.cpp
 
 	src/HFSHighLevelVolume.cpp
+
+	src/APFSBTreeNode.cpp
+	src/APFSContainer.cpp
+	src/APFSVolume.cpp
 )
 target_compile_features(dmg PRIVATE cxx_std_11)
 target_link_libraries(dmg -licuuc -lcrypto -lz -lbz2 -llzma ${LIBXML2_LIBRARY})
