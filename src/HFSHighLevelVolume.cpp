@@ -2,8 +2,7 @@
 #include <stdint.h>
 #include <cstring>
 #include "HFSAttributeBTree.h"
-#include "HFSZlibReader.h"
-#include "DecmpfsChunkReader.h"
+#include "DecmpfsFile.h"
 #include "MemoryReader.h"
 #include "ResourceFork.h"
 #include "exceptions.h"
@@ -133,69 +132,15 @@ std::shared_ptr<Reader> HFSHighLevelVolume::openFile(const std::string& path)
 	}
 	else
 	{
-		decmpfs_disk_header* hdr;
 		std::vector<uint8_t> holder;
 
-		hdr = get_decmpfs(be(ff.file.fileID), holder);
-
-		if (!hdr)
+		if (!get_decmpfs(be(ff.file.fileID), holder))
 			throw file_not_found_error(path);
 
-
-#ifdef DEBUG
-		std::cout << "Opening compressed file, compression type: " << int(hdr->compression_type) << std::endl;
-#endif
-		switch (DecmpfsCompressionType(hdr->compression_type))
-		{
-			case DecmpfsCompressionType::UncompressedInline:
-				file.reset(new MemoryReader(hdr->attr_bytes, hdr->uncompressed_size));
-				break;
-			case DecmpfsCompressionType::CompressedInline:
-				file.reset(new MemoryReader(hdr->attr_bytes, holder.size() - 16));
-				file.reset(new HFSZlibReader(file, hdr->uncompressed_size, true));
-				break;
-			case DecmpfsCompressionType::CompressedResourceFork:
-			{
-				rv = m_tree->openFile(spath.c_str(), file, true);
-				if (rv == 0)
-				{
-					std::unique_ptr<ResourceFork> rsrc (new ResourceFork(file));
-					file = rsrc->getResource(DECMPFS_MAGIC, DECMPFS_ID);
-
-					if (file)
-						file.reset(new HFSZlibReader(file, hdr->uncompressed_size));
-					else
-						throw function_not_implemented_error("Could not find decmpfs resource in resource fork");
-				}
-				break;
-			}
-			case DecmpfsCompressionType::LZVNInline:
-			case DecmpfsCompressionType::LZFSEInline:
-			{
-				const auto codec = DecmpfsCompressionType(hdr->compression_type) == DecmpfsCompressionType::LZVNInline
-					? DecmpfsChunkReader::Codec::LZVN : DecmpfsChunkReader::Codec::LZFSE;
-				file.reset(new MemoryReader(hdr->attr_bytes, holder.size() - 16));
-				file.reset(new DecmpfsChunkReader(file, hdr->uncompressed_size, codec, true));
-				break;
-			}
-			case DecmpfsCompressionType::LZVNResourceFork:
-			case DecmpfsCompressionType::LZFSEResourceFork:
-			{
-				// Unlike type 4, the chunk table starts the fork's data rather than a resource in it.
-				const auto codec = DecmpfsCompressionType(hdr->compression_type) == DecmpfsCompressionType::LZVNResourceFork
-					? DecmpfsChunkReader::Codec::LZVN : DecmpfsChunkReader::Codec::LZFSE;
-				rv = m_tree->openFile(spath.c_str(), file, true);
-				if (rv != 0)
-					throw file_not_found_error(path);
-				file.reset(new DecmpfsChunkReader(file, hdr->uncompressed_size, codec));
-				break;
-			}
-			default: {
-				char msg[128];
-				snprintf(msg, sizeof(msg), "Unknown compression type: %u", (unsigned int)hdr->compression_type);
-				throw function_not_implemented_error(msg);
-			}
-		}
+		file = openDecmpfsFile(holder, [&]() {
+			std::shared_ptr<Reader> fork;
+			return m_tree->openFile(spath.c_str(), fork, true) == 0 ? fork : nullptr;
+		}, path);
 	}
 
 	file.reset(new CachedReader(file, m_volume->getFileZone(), path));

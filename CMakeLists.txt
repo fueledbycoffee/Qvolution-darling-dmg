@@ -21,6 +21,7 @@ set(dmg_sources
 	src/adc.cpp
 	src/HFSZlibReader.cpp
 	src/DecmpfsChunkReader.cpp
+	src/DecmpfsFile.cpp
 	src/MemoryReader.cpp
 
 	src/GPTDisk.cpp
@@ -103,6 +104,7 @@ add_library(dmg SHARED
 	src/adc.cpp
 	src/HFSZlibReader.cpp
 	src/DecmpfsChunkReader.cpp
+	src/DecmpfsFile.cpp
 	src/MemoryReader.cpp
 
 	src/GPTDisk.cpp
