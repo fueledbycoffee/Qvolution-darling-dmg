@@ -20,6 +20,7 @@ set(dmg_sources
 	src/DMGDecompressor.cpp
 	src/adc.cpp
 	src/HFSZlibReader.cpp
+	src/DecmpfsChunkReader.cpp
 	src/MemoryReader.cpp
 
 	src/GPTDisk.cpp
@@ -101,6 +102,7 @@ add_library(dmg SHARED
 	src/DMGDecompressor.cpp
 	src/adc.cpp
 	src/HFSZlibReader.cpp
+	src/DecmpfsChunkReader.cpp
 	src/MemoryReader.cpp
 
 	src/GPTDisk.cpp
@@ -148,6 +150,13 @@ target_include_directories(apfs-parser-test PRIVATE src)
 target_link_libraries(apfs-parser-test dmg)
 add_test(NAME apfs-parser COMMAND apfs-parser-test)
 set_tests_properties(apfs-parser PROPERTIES ENVIRONMENT "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:dmg>")
+if (DMG_LZFSE_LIBRARIES)
+	add_executable(decmpfs-chunk-test test/decmpfs-chunk-test.cpp)
+	target_include_directories(decmpfs-chunk-test PRIVATE src)
+	target_link_libraries(decmpfs-chunk-test dmg ${DMG_LZFSE_LIBRARIES})
+	add_test(NAME decmpfs-chunks COMMAND decmpfs-chunk-test)
+	set_tests_properties(decmpfs-chunks PROPERTIES ENVIRONMENT "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:dmg>")
+endif ()
 
 # Vendor disk images are too large to commit. Point DMG_TEST_ARTIFACTS, DMG_TEST_INPUTS or both
 # at directories laid out as <app>/<version>/{<image>,bundle-content-manifest.json} to compare
@@ -189,6 +198,8 @@ if (DMG_TEST_INPUTS)
 	add_extract_test(extract-dcommander-3.9.9.2 ${DMG_TEST_INPUTS} dcommander/3.9.9.2/DCommander-3992.dmg DCommander.app)
 	# A single blkx holding the whole disk
 	add_extract_test(extract-sonic3air-26.03.28 ${DMG_TEST_INPUTS} sonic3air/26.03.28.0/sonic3air_mac_260328.dmg "Sonic 3 AIR.app")
+	# HFS+ files compressed with decmpfs LZVN, inline and in resource forks
+	add_extract_test(extract-keka-1.6.8 ${DMG_TEST_INPUTS} keka/1.6.8/Keka-1.6.8.dmg Keka.app)
 endif (DMG_TEST_INPUTS)
 
 # This is used in Darling build.

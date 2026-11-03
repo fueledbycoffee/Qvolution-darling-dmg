@@ -11,7 +11,12 @@ enum class DecmpfsCompressionType : uint32_t
 {
 	UncompressedInline = 1, // inline = after the header in xattr
 	CompressedInline = 3,
-	CompressedResourceFork = 4
+	CompressedResourceFork = 4,
+	// The rest were observed in disk images rather than taken from documentation
+	LZVNInline = 7,
+	LZVNResourceFork = 8,
+	LZFSEInline = 11,
+	LZFSEResourceFork = 12
 };
 
 #pragma pack(1)
