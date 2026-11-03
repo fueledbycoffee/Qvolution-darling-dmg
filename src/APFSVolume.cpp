@@ -1,6 +1,8 @@
 #include "APFSVolume.h"
 #include "APFSBTreeNode.h"
+#include "DecmpfsFile.h"
 #include "MemoryReader.h"
+#include "decmpfs.h"
 #include "exceptions.h"
 #include <algorithm>
 #include <climits>
@@ -10,6 +12,10 @@
 #ifndef UF_COMPRESSED
 #define UF_COMPRESSED 0x00000020 // xnu bsd/sys/stat.h
 #endif
+
+// APFS has no resource forks of its own; a compressed file's is assumed to be the extended
+// attribute that HFSHighLevelVolume presents an HFS+ resource fork as.
+static const char RESOURCE_FORK_EA_NAME[] = "com.apple.ResourceFork";
 
 namespace
 {
@@ -309,9 +315,9 @@ oid_t APFSVolume::lookup(const std::string& path)
 	return oid;
 }
 
-bool APFSVolume::xattr(oid_t oid, const std::string& name, std::vector<uint8_t>& data)
+std::shared_ptr<Reader> APFSVolume::xattrReader(oid_t oid, const std::string& name)
 {
-	bool found = false;
+	std::shared_ptr<Reader> reader;
 
 	forEachRecord(oid, APFS_TYPE_XATTR, [&](const uint8_t* key, uint16_t keyLength, const uint8_t* value, uint16_t valueLength)
 	{
@@ -327,7 +333,7 @@ bool APFSVolume::xattr(oid_t oid, const std::string& name, std::vector<uint8_t>&
 		{
 			if (sizeof(*v) + le(v->xdata_len) > valueLength)
 				throw io_error("APFS extended attribute data is out of bounds");
-			data.assign(v->xdata, v->xdata + le(v->xdata_len));
+			reader = std::make_shared<MemoryReader>(v->xdata, le(v->xdata_len));
 		}
 		else if (le(v->flags) & XATTR_DATA_STREAM)
 		{
@@ -336,20 +342,27 @@ bool APFSVolume::xattr(oid_t oid, const std::string& name, std::vector<uint8_t>&
 			if (sizeof(*v) + sizeof(dstream) > valueLength)
 				throw io_error("APFS extended attribute stream is out of bounds");
 			memcpy(&dstream, v->xdata, sizeof(dstream));
-
-			if (le(dstream.dstream.size) > INT32_MAX)
-				throw io_error("APFS extended attribute stream is too large");
-			std::shared_ptr<Reader> stream = openStream(le(dstream.xattr_obj_id), le(dstream.dstream.size));
-			data.resize(stream->length());
-			if (!data.empty() && stream->read(data.data(), data.size(), 0) != int32_t(data.size()))
-				throw io_error("Short read of APFS extended attribute stream");
+			reader = openStream(le(dstream.xattr_obj_id), le(dstream.dstream.size));
 		}
 		else
 			throw io_error("APFS extended attribute has no data");
-		found = true;
 	});
 
-	return found;
+	return reader;
+}
+
+bool APFSVolume::xattr(oid_t oid, const std::string& name, std::vector<uint8_t>& data)
+{
+	std::shared_ptr<Reader> reader = xattrReader(oid, name);
+
+	if (!reader)
+		return false;
+	if (reader->length() > INT32_MAX)
+		throw io_error("APFS extended attribute stream is too large");
+	data.resize(reader->length());
+	if (!data.empty() && reader->read(data.data(), data.size(), 0) != int32_t(data.size()))
+		throw io_error("Short read of APFS extended attribute stream");
+	return true;
 }
 
 std::string APFSVolume::symlinkTarget(oid_t oid)
@@ -432,6 +445,15 @@ void APFSVolume::inodeToStat(oid_t oid, const std::vector<uint8_t>& inode, struc
 	st->st_nlink = le(val.nchildren_or_nlink);
 	if (S_ISLNK(st->st_mode))
 		st->st_size = symlinkTarget(oid).size();
+	else if (le(val.bsd_flags) & UF_COMPRESSED)
+	{
+		std::vector<uint8_t> attribute;
+		uint64_t size;
+
+		if (!xattr(oid, DECMPFS_XATTR_NAME, attribute) || !decmpfsUncompressedSize(attribute, size) || size > INT64_MAX)
+			throw io_error("APFS compressed file " + std::to_string(oid) + " has no valid decmpfs attribute");
+		st->st_size = size;
+	}
 	else
 		st->st_size = dstreamSize(inode);
 }
@@ -474,7 +496,13 @@ std::shared_ptr<Reader> APFSVolume::openFile(const std::string& path)
 		return std::make_shared<MemoryReader>(reinterpret_cast<const uint8_t*>(target.data()), target.size());
 	}
 	if (le(val.bsd_flags) & UF_COMPRESSED)
-		throw function_not_implemented_error("Compressed files on APFS are not supported: " + path);
+	{
+		std::vector<uint8_t> attribute;
+
+		if (!xattr(oid, DECMPFS_XATTR_NAME, attribute))
+			throw io_error("APFS compressed file has no decmpfs attribute: " + path);
+		return openDecmpfsFile(attribute, [&]() { return xattrReader(oid, RESOURCE_FORK_EA_NAME); }, path);
+	}
 
 	return openStream(le(val.private_id), dstreamSize(data));
 }

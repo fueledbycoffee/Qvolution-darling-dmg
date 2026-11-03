@@ -9,7 +9,7 @@
 #include <vector>
 
 // A read-only view of one unencrypted APFS volume, with the same interface as
-// HFSHighLevelVolume. Files compressed with decmpfs are not supported yet and fail to open.
+// HFSHighLevelVolume.
 class APFSVolume
 {
 public:
@@ -28,6 +28,8 @@ private:
 	oid_t lookup(const std::string& path);
 	std::map<std::string, oid_t> directoryEntries(oid_t directory);
 	std::vector<uint8_t> inode(oid_t oid);
+	// Returns nullptr if the object has no such extended attribute.
+	std::shared_ptr<Reader> xattrReader(oid_t oid, const std::string& name);
 	bool xattr(oid_t oid, const std::string& name, std::vector<uint8_t>& data);
 	std::string symlinkTarget(oid_t oid);
 	std::shared_ptr<Reader> openStream(oid_t streamId, uint64_t size);

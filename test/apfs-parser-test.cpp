@@ -3,10 +3,12 @@
 // instead of returning wrong data.
 //
 // Blocks: 0 superblock copy, 1 checkpoint superblock, 2-3 container object map, 4 volume
-// superblock, 5-6 volume object map, 7 file-system tree root, 8 file data, 9 spare node.
+// superblock, 5-6 volume object map, 7 file-system tree root, 8 file data, 9 spare node,
+// 10 resource fork of a compressed file.
 #include "APFSContainer.h"
 #include "APFSVolume.h"
 #include "MemoryReader.h"
+#include "decmpfs.h"
 #include "exceptions.h"
 #include <cstring>
 #include <functional>
@@ -15,8 +17,12 @@
 #include <string>
 #include <vector>
 
+#ifndef UF_COMPRESSED
+#define UF_COMPRESSED 0x00000020 // xnu bsd/sys/stat.h
+#endif
+
 static const uint32_t BS = 4096;
-static const uint64_t BLOCKS = 10;
+static const uint64_t BLOCKS = 11;
 static const oid_t VOLUME_OID = 1026, ROOT_TREE_OID = 1027, SPARE_NODE_OID = 1028;
 static const char CONTENT[] = "hello world\n";
 
@@ -41,6 +47,8 @@ struct Options
 	std::string fileName = "hello.txt";
 	bool selfReferencingTree = false;
 	bool treeRevisitsNode = false;
+	uint32_t forkTableSize = 8;
+	bool missingDecmpfs = false;
 };
 
 struct Entry
@@ -167,6 +175,36 @@ static Entry extent(oid_t stream, uint64_t logical, uint64_t length, uint64_t bl
 	return e;
 }
 
+static Entry xattrEntry(oid_t oid, const std::string& name, uint16_t flags, const std::vector<uint8_t>& data)
+{
+	Entry e = { fsKey(oid, APFS_TYPE_XATTR), {} };
+	append(e.key, uint16_t(name.size() + 1));
+	e.key.insert(e.key.end(), name.begin(), name.end());
+	e.key.push_back(0);
+	append(e.value, j_xattr_val_t{ flags, uint16_t(data.size()) });
+	e.value.insert(e.value.end(), data.begin(), data.end());
+	return e;
+}
+
+static std::vector<uint8_t> decmpfsHeader(DecmpfsCompressionType type)
+{
+	std::vector<uint8_t> v;
+	append(v, decmpfs_disk_header{ DECMPFS_MAGIC, uint32_t(type), sizeof(CONTENT) - 1 });
+	return v;
+}
+
+// The resource fork of a file compressed with decmpfs type 8: a table of two offsets, then one
+// chunk stored uncompressed (marked by its first byte, 0x06).
+static std::vector<uint8_t> resourceFork(const Options& o)
+{
+	std::vector<uint8_t> v;
+	append(v, o.forkTableSize);
+	append(v, uint32_t(8 + 1 + sizeof(CONTENT) - 1));
+	v.push_back(0x06);
+	v.insert(v.end(), CONTENT, CONTENT + sizeof(CONTENT) - 1);
+	return v;
+}
+
 static std::vector<Entry> fsRecords(const Options& o)
 {
 	std::vector<Entry> records;
@@ -174,6 +212,8 @@ static std::vector<Entry> fsRecords(const Options& o)
 	records.push_back({ fsKey(ROOT_DIR_INO_NUM, APFS_TYPE_INODE), inodeValue(1, ROOT_DIR_INO_NUM, S_IFDIR | 0755, 2) });
 	records.push_back(drec(ROOT_DIR_INO_NUM, o.fileName, 16, 8));
 	records.push_back(drec(ROOT_DIR_INO_NUM, "link", 17, 10));
+	records.push_back(drec(ROOT_DIR_INO_NUM, "packed.txt", 18, 8));
+	records.push_back(drec(ROOT_DIR_INO_NUM, "inline.txt", 20, 8));
 
 	// The file's inode carries its size in an INO_EXT_TYPE_DSTREAM extended field.
 	std::vector<uint8_t> file = inodeValue(ROOT_DIR_INO_NUM, 16, S_IFREG | 0644, 1);
@@ -204,6 +244,30 @@ static std::vector<Entry> fsRecords(const Options& o)
 	target.value.insert(target.value.end(), path.begin(), path.end());
 	target.value.push_back(0);
 	records.push_back(target);
+
+	// Files compressed with decmpfs have no data stream; their contents and size come from the
+	// com.apple.decmpfs attribute and, for type 8, a resource fork in a stream of its own (19).
+	std::vector<uint8_t> packed = inodeValue(ROOT_DIR_INO_NUM, 18, S_IFREG | 0644, 1);
+	reinterpret_cast<j_inode_val_t*>(packed.data())->bsd_flags = UF_COMPRESSED;
+	records.push_back({ fsKey(18, APFS_TYPE_INODE), packed });
+	j_xattr_dstream_t forkStream;
+	memset(&forkStream, 0, sizeof(forkStream));
+	forkStream.xattr_obj_id = 19;
+	forkStream.dstream.size = resourceFork(o).size();
+	forkStream.dstream.alloced_size = BS;
+	std::vector<uint8_t> forkValue;
+	append(forkValue, forkStream);
+	records.push_back(xattrEntry(18, "com.apple.ResourceFork", XATTR_DATA_STREAM, forkValue));
+	if (!o.missingDecmpfs)
+		records.push_back(xattrEntry(18, DECMPFS_XATTR_NAME, XATTR_DATA_EMBEDDED, decmpfsHeader(DecmpfsCompressionType::LZVNResourceFork)));
+	records.push_back(extent(19, 0, BS, 10, 0));
+
+	std::vector<uint8_t> inlined = inodeValue(ROOT_DIR_INO_NUM, 20, S_IFREG | 0644, 1);
+	reinterpret_cast<j_inode_val_t*>(inlined.data())->bsd_flags = UF_COMPRESSED;
+	records.push_back({ fsKey(20, APFS_TYPE_INODE), inlined });
+	std::vector<uint8_t> attribute = decmpfsHeader(DecmpfsCompressionType::UncompressedInline);
+	attribute.insert(attribute.end(), CONTENT, CONTENT + sizeof(CONTENT) - 1);
+	records.push_back(xattrEntry(20, DECMPFS_XATTR_NAME, XATTR_DATA_EMBEDDED, attribute));
 
 	return records;
 }
@@ -269,10 +333,12 @@ static std::vector<uint8_t> build(const Options& o)
 		writeNode(block(7), OBJECT_TYPE_BTREE, true, 0, false, 0, 0, fsRecords(o));
 
 	memcpy(block(8), CONTENT, sizeof(CONTENT) - 1);
+	const std::vector<uint8_t> fork = resourceFork(o);
+	memcpy(block(10), fork.data(), fork.size());
 
 	for (size_t n = 0; n < BLOCKS; n++)
 	{
-		if (n != 8)
+		if (n != 8 && n != 10)
 			seal(block(n));
 	}
 	if (o.breakBlockZeroChecksum)
@@ -318,8 +384,18 @@ static void expectRejected(const std::string& what, std::function<void(Options&)
 int main()
 {
 	std::map<std::string, std::string> files = extract(build(Options()));
-	expect(files.size() == 2 && files["hello.txt"] == CONTENT && files["link"] == "hello.txt",
+	expect(files.size() == 4 && files["hello.txt"] == CONTENT && files["link"] == "hello.txt",
 		"an intact container reads back its file and symbolic link");
+	expect(files["packed.txt"] == CONTENT, "a file compressed into its resource fork reads back");
+	expect(files["inline.txt"] == CONTENT, "a file stored inline in its decmpfs attribute reads back");
+	{
+		const std::vector<uint8_t> image = build(Options());
+		auto container = std::make_shared<APFSContainer>(std::make_shared<MemoryReader>(image.data(), image.size()));
+		APFSVolume volume(container, container->volumes().at(0));
+		auto listing = volume.listDirectory("/");
+		expect(listing["packed.txt"].st_size == sizeof(CONTENT) - 1 && volume.stat("/inline.txt").st_size == sizeof(CONTENT) - 1,
+			"compressed files report their uncompressed size");
+	}
 
 	expectRejected("an object map node with variable-size entries", [](Options& o) { o.omapFixed = false; });
 	expectRejected("a superblock copy in block zero with a bad checksum", [](Options& o) { o.breakBlockZeroChecksum = true; });
@@ -335,6 +411,8 @@ int main()
 	expectRejected("a file name with a NUL in it", [](Options& o) { o.fileName = std::string("a\0b", 3); });
 	expectRejected("a tree node that points at itself", [](Options& o) { o.selfReferencingTree = true; });
 	expectRejected("a tree that reads one node more times than there are blocks", [](Options& o) { o.treeRevisitsNode = true; });
+	expectRejected("a compressed file without a decmpfs attribute", [](Options& o) { o.missingDecmpfs = true; });
+	expectRejected("a compressed file whose chunk table has the wrong size", [](Options& o) { o.forkTableSize = 12; });
 
 	return failures ? 1 : 0;
 }
